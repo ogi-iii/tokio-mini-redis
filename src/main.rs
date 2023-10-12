@@ -1,3 +1,6 @@
+use std::{sync::{Arc, Mutex}, collections::HashMap};
+
+use bytes::Bytes;
 use mini_redis::{Connection, Frame};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -5,22 +8,28 @@ use tokio::net::{TcpListener, TcpStream};
 /// mini-redis server
 async fn main() {
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
+    println!("Listening");
+
+    // 複数スレッド(複数タスク)間で状態を共有するDBの定義
+    let db = Arc::new(Mutex::new(HashMap::new()));
+
     loop {
         let (socket, _) = listener.accept().await.unwrap();
 
+        // タスクごとに(スレッドセーフな)クローンを取得: タスク間で状態を共有するため
+        let db = db.clone();
+
         // spawnで並行処理可能なタスクを生成: スレッド(並列)数に関わらず同時並行で処理される
         tokio::spawn(async move { // moveで変数の所有権をタスクに移動させる必要がある
-            process(socket).await;
+            process(socket, db).await; // 所有権の移動に伴い、状態共有変数は事前に(対象全体を)クローンして別変数に格納すること！
         });
     }
 }
 
-async fn process(socket: TcpStream) {
-    use mini_redis::Command::{self, Get, Set};
-    use std::collections::HashMap;
+type Db = Arc<Mutex<HashMap<String, Bytes>>>;
 
-    // ソケット(クライアントからの接続経路)単位でDBを定義
-    let mut db = HashMap::new();
+async fn process(socket: TcpStream, db: Db) {
+    use mini_redis::Command::{self, Get, Set};
 
     let mut connection = Connection::new(socket);
 
@@ -30,13 +39,16 @@ async fn process(socket: TcpStream) {
 
         let response = match Command::from_frame(frame).unwrap() {
             Set(cmd) => {
-                // store value as bytes array
-                db.insert(cmd.key().to_string(), cmd.value().to_vec());
+                // 値の変更前に排他制御を実施
+                let mut db = db.lock().unwrap();
+                db.insert(cmd.key().to_string(), cmd.value().clone());
                 Frame::Simple("OK".to_string())
             }
             Get(cmd) => {
+                // 値を取得する前に排他制御を実施
+                let db = db.lock().unwrap();
                 if let Some(value) = db.get(cmd.key()) {
-                    Frame::Bulk(value.clone().into())
+                    Frame::Bulk(value.clone())
                 } else {
                     Frame::Null
                 }
