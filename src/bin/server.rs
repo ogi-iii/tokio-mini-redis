@@ -14,6 +14,7 @@ async fn main() {
     let db = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
+        // awaitにより、listener.accept()が完了するまで次のループの処理は始まらない
         let (socket, _) = listener.accept().await.unwrap();
 
         // タスクごとに(スレッドセーフな)クローンを取得: タスク間で状態を共有するため
